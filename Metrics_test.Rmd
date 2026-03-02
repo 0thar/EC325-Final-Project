@@ -1,0 +1,13 @@
+---
+title: "Metrics Project Test"
+author: "Othar Zaldastani II"
+date: "2026-03-02"
+output: html_document
+---
+
+## Title
+
+```{r}
+my.vector = c(1, 2, 3, 4, 5)
+```
+
