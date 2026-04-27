@@ -1,0 +1,146 @@
+---
+title: "Untitled"
+format: html
+---
+
+---
+title: "SC306 Homework 6"
+author: "Othar Zaldastani II"
+date: "April 8, 2026"
+format:
+  pdf:
+    df-print: paged
+    include-in-header:
+      text: |
+        \usepackage{xcolor}
+        \makeatletter
+        \makeatother
+        \usepackage{float}
+        \usepackage{endnotes}
+        \renewcommand{\CommentTok}[1]{\textcolor[rgb]{0.60,0.20,0.20}{#1}}
+  docx: default
+---
+
+```{r}
+#| label: setup
+#| echo: true
+#| results: hide
+#| message: false
+#| warning: false
+#| include: false
+
+# Setup Chunk
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  attr.source = '.numberLines',
+  cache = FALSE)
+
+library(tidyverse)
+library(psych)
+library(psychTools)
+library(dplyr)
+library(knitr)
+library(kableExtra)
+library(epitools)
+library(broom)
+library(modelsummary)
+library(kableExtra)
+set.seed(24)
+
+options(
+  modelsummary_stars = TRUE,
+  modelsummary_output = "markdown",
+  modelsummary_shape = model ~ term,
+  modelsummary_fmt = 2,
+  modelsummary_gof_omit = "")
+
+ms <- function(models, ...) {
+  g <- broom::glance(models)
+  modelsummary(models, stars = F, output = "markdown",
+               shape = model ~ term, fmt = 2,
+               statistic = c("({std.error})", "p = {p.value}"),
+               notes = paste0("R² = ", round(g$r.squared, 3),
+                              ", Adj. R² = ", round(g$adj.r.squared, 3),
+                              ", F = ", round(g$statistic, 2),
+                              ", p = ", format.pval(g$p.value, digits = 3),
+                              ", N = ", g$nobs), ...)}
+
+kable2 <- function(x, ...) {
+  kableExtra::kable_styling(
+    knitr::kable(x, ...))}
+
+fig_paths  <- character(0)
+fig_labels <- character(0)
+fig_num    <- 0L
+
+knitr::knit_hooks$set(plot = function(x, options) {
+  fig_num    <<- fig_num + 1L
+  fig_paths  <<- c(fig_paths, x)
+  fig_labels <<- c(fig_labels, options$label)
+  paste0("\n\n\\textbf{Figure ", fig_num, "} --- see Figure Appendix.\n\n")})
+```
+
+
+# Question 1
+## Part A
+```{r Question 1A}
+pairs.panels(mtcars, main = "Panels for Q1A")
+```
+
+#### Part B
+Model 1
+```{r Question 1B}
+m1 <- lm(mpg ~ hp, data = mtcars)
+```
+
+```{r Question 1B Summary, out.width="6in"}
+ms(m1)
+```
+
+\pagebreak
+# Question 2
+#### Part A
+Plot 2
+```{r Question 2A}
+plot(mtcars$mpg, mtcars$hp, data = mtcars, main = "Panels for Q2A")
+```
+
+
+
+
+\pagebreak
+# Figure Appendix
+
+```{r}
+#| label: figure-appendix
+#| echo: false
+#| results: asis
+
+for (i in seq_along(fig_paths)) {
+  cat(paste0(
+    "```{=latex}\n",
+    "\\begin{figure}[H]\n",
+    "\\centering\n",
+    "\\includegraphics[width=0.8\\linewidth]{", fig_paths[i], "}\n",
+    "\\begin{center}\\textbf{Figure ", i, " (", fig_labels[i], ")}\\end{center}\n",
+    "\\end{figure}\n",
+    "```\n\n"))}
+```
+
+
+
+\pagebreak
+# Code Appendix
+
+```{r}
+#| ref.label: !expr knitr::all_labels()
+#| echo: true
+#| eval: false
+```
+
+\vfill
+
+Attributions: I have used some template/styling code from GitHub user alexpghayes.

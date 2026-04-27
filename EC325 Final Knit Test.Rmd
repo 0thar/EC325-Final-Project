@@ -1,0 +1,573 @@
+---
+title: "Title"
+author: "Othar Zaldastani II"
+date: "Date"
+output:
+  html_document:
+    df_print: paged
+  word_document: default
+  pdf_document:
+    df_print: paged
+header-includes:
+- \usepackage{xcolor}
+- \makeatletter
+- \makeatother
+- \usepackage{float}
+- \usepackage{endnotes}
+- \renewcommand{\CommentTok}[1]{\textcolor[rgb]{0.60,0.20,0.20}{#1}}
+---
+
+```{r setup, echo=TRUE, results='hide', message=FALSE, warning=FALSE, include = F}
+# Setup Chunk
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  attr.source = '.numberLines',
+  cache = FALSE)
+
+library(tidyverse)
+library(psych)
+library(psychTools)
+library(dplyr)
+library(knitr)
+library(kableExtra)
+library(epitools)
+library(broom)
+library(modelsummary)
+library(kableExtra)
+set.seed(24)
+
+options(
+  modelsummary_stars = TRUE,
+  modelsummary_output = "markdown",
+  modelsummary_shape = model ~ term,
+  modelsummary_fmt = 2,
+  modelsummary_gof_omit = "")
+
+ms <- function(models, ...) {
+  g <- broom::glance(models)
+  modelsummary(models, stars = F, output = "markdown",
+               shape = model ~ term, fmt = 2,
+               statistic = c("({std.error})", "p = {p.value}"),
+               notes = paste0("R² = ", round(g$r.squared, 3),
+                              ", Adj. R² = ", round(g$adj.r.squared, 3),
+                              ", F = ", round(g$statistic, 2),
+                              ", p = ", format.pval(g$p.value, digits = 3),
+                              ", N = ", g$nobs), ...)}
+
+kable2 <- function(x, ...) {
+  kableExtra::kable_styling(
+    knitr::kable(x, ...))}
+
+
+```
+
+
+
+```{r libraries}
+library(tidyverse)
+library(plm)
+library(lmtest)
+library(sandwich)
+library(xgboost)
+library(Metrics)
+library(corrplot)
+library(scales)
+library(zoo)
+library(knitr)
+library(kableExtra)
+```
+
+---
+
+# 1. Load & Reshape
+
+The raw data is in wide format — one column per year. We pivot to long, recode series names, then pivot back to get one row per country-year with each indicator as its own column.
+
+```{r load-reshape}
+FDI_Data4 <- read.csv("~/Downloads/P_Data_Extract_From_World_Development_Indicators-2/e24a155d-2435-4e2c-954e-222fbe9ccf40_Data.csv")
+raw <- FDI_Data4
+names(raw) <- gsub("\\.", " ", names(raw)) |> trimws()
+
+long <- raw %>%
+  pivot_longer(
+    cols      = matches("^X\\d{4}"),
+    names_to  = "year_label",
+    values_to = "value"
+  ) %>%
+  mutate(
+    year  = as.integer(str_extract(year_label, "\\d{4}")),
+    value = suppressWarnings(as.numeric(value)),
+    var   = case_when(
+      `Series Name` == "Total natural resources rents (% of GDP)"                 ~ "nat_resources",
+      `Series Name` == "Control of Corruption: Estimate"                           ~ "corruption",
+      `Series Name` == "Government Effectiveness: Estimate"                        ~ "gov_effectiveness",
+      `Series Name` == "Political Stability and Absence of Violence/Terrorism: Estimate" ~ "pol_stability",
+      `Series Name` == "Gini index"                                                ~ "gini",
+      `Series Name` == "Tax revenue (% of GDP)"                                    ~ "tax_revenue",
+      `Series Name` == "Expense (% of GDP)"                                        ~ "gov_expense",
+      `Series Name` == "Rule of Law: Estimate"                                     ~ "rule_of_law",
+      `Series Name` == "Regulatory Quality: Estimate"                              ~ "reg_quality",
+      `Series Name` == "Literacy rate, adult total (% of people ages 15 and above)" ~ "literacy",
+      grepl("Human capital", `Series Name`)                                        ~ "hci",
+      `Series Name` == "Energy use (kg of oil equivalent per capita)"              ~ "energy_use",
+      `Series Name` == "Trade (% of GDP)"                                          ~ "trade",
+      `Series Name` == "GDP per capita (constant 2015 US$)"                        ~ "gdp_pc",
+      `Series Name` == "Foreign direct investment, net inflows (% of GDP)"         ~ "fdi",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(var)) %>%
+  select(`Country Name`, `Country Code`, year, var, value)
+
+panel <- long %>%
+  pivot_wider(
+    id_cols     = c(`Country Name`, `Country Code`, year),
+    names_from  = var,
+    values_from = value,
+    values_fn   = mean
+  ) %>%
+  rename(country = `Country Name`, iso3 = `Country Code`) %>%
+  rename_with(~ gsub("[^a-zA-Z0-9_]", "_", .x)) %>%
+  filter(year >= 1996, year <= 2023)
+
+glimpse(panel)
+```
+
+---
+
+# 2. Feature Engineering
+
+```{r features}
+panel <- panel %>%
+  arrange(iso3, year) %>%
+  group_by(iso3) %>%
+  mutate(
+    # Log GDP — stabilises variance for modelling
+    log_gdp_pc    = log(gdp_pc),
+
+    # GDP growth rate
+    gdp_growth    = (gdp_pc - lag(gdp_pc)) / lag(gdp_pc) * 100,
+
+    # Lagged GDP — autoregressive signal
+    gdp_lag1      = lag(gdp_pc, 1),
+    gdp_lag3      = lag(gdp_pc, 3),
+
+    # Lagged FDI — investment effects on GDP are delayed
+    fdi_lag1      = lag(fdi, 1),
+    fdi_lag3      = lag(fdi, 3),
+
+    # Governance composite — mean of 5 WB indicators
+    gov_composite = rowMeans(cbind(corruption, gov_effectiveness,
+                                   pol_stability, rule_of_law,
+                                   reg_quality), na.rm = TRUE),
+
+    # Rolling 3-year governance — smooths year-to-year noise
+    gov_roll3     = rollmeanr(gov_composite, 3, fill = NA),
+
+    # FDI x governance — FDI matters more in high-governance environments
+    fdi_x_gov     = fdi_lag1 * gov_composite,
+
+    # Trade
+    trade_lag1    = lag(trade, 1),
+    trade_growth  = (trade - lag(trade)) / lag(trade) * 100,
+
+    # Resource dependency lag
+    nat_res_lag1  = lag(nat_resources, 1),
+
+    # Tax burden change
+    tax_change    = tax_revenue - lag(tax_revenue)
+  ) %>%
+  ungroup()
+```
+
+| Feature | Description |
+|---|---|
+| `log_gdp_pc` | Log GDP per capita — stabilises variance |
+| `gdp_lag1/3` | Lagged GDP — autoregressive predictor |
+| `fdi_lag1/3` | Lagged FDI — investment effects are delayed |
+| `gov_composite` | Mean of 5 World Bank governance indicators |
+| `gov_roll3` | 3-year rolling governance mean |
+| `fdi_x_gov` | FDI x governance interaction |
+| `trade_lag1` | Lagged trade openness |
+
+---
+
+# 3. Exploratory Data Analysis
+
+## 3.1 Data Coverage
+
+Red = sparse, green = good coverage.
+
+```{r coverage-heatmap, fig.height=5}
+coverage <- long %>%
+  filter(year >= 1960, year <= 2023) %>%
+  group_by(var, year) %>%
+  summarise(pct_available = mean(!is.na(value)) * 100, .groups = "drop")
+
+ggplot(coverage, aes(x = year, y = var, fill = pct_available)) +
+  geom_tile(colour = "white", linewidth = 0.3) +
+  scale_fill_gradient2(
+    low      = "#d73027", mid = "#fee090", high = "#1a9850",
+    midpoint = 50, name = "% countries\nwith data"
+  ) +
+  labs(title = "Data Coverage by Indicator and Year", x = NULL, y = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## 3.2 FDI vs Log GDP per Capita
+
+Colour shows governance quality — higher governance countries tend to attract more productive FDI.
+
+```{r fdi-gdp-scatter}
+panel %>%
+  filter(year == 2015, !is.na(fdi), !is.na(gdp_pc)) %>%
+  ggplot(aes(x = fdi, y = log_gdp_pc, colour = gov_composite)) +
+  geom_point(alpha = 0.7, size = 2.5) +
+  geom_smooth(method = "lm", se = TRUE, colour = "black", linewidth = 0.7) +
+  scale_colour_gradient2(
+    low      = "#d73027", mid = "#fee090", high = "#1a9850",
+    midpoint = 0, name = "Governance\ncomposite"
+  ) +
+  scale_x_continuous(limits = c(-5, 30)) +
+  labs(
+    title = "FDI vs Log GDP per Capita (2015)",
+    x     = "FDI net inflows (% of GDP)",
+    y     = "Log GDP per capita (constant 2015 USD)"
+  ) +
+  theme_minimal()
+```
+
+## 3.3 GDP per Capita Distribution Over Time
+
+```{r gdp-boxplot}
+panel %>%
+  filter(!is.na(gdp_pc), year %in% seq(1960, 2023, by = 3)) %>%
+  mutate(year = factor(year)) %>%
+  ggplot(aes(x = year, y = log_gdp_pc)) +
+  geom_boxplot(fill = "#2166ac", alpha = 0.6, outlier.size = 0.8) +
+  labs(
+    title = "Distribution of Log GDP per Capita Over Time",
+    x     = NULL,
+    y     = "Log GDP per capita (constant 2015 USD)"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## 3.4 Global FDI Trend
+
+```{r fdi-trend}
+panel %>%
+  group_by(year) %>%
+  summarise(mean_fdi = mean(fdi, na.rm = TRUE),
+            sd_fdi   = sd(fdi, na.rm = TRUE)) %>%
+  ggplot(aes(x = year, y = mean_fdi)) +
+  geom_ribbon(aes(ymin = mean_fdi - sd_fdi, ymax = mean_fdi + sd_fdi),
+              alpha = 0.2, fill = "#2166ac") +
+  geom_line(colour = "#2166ac", linewidth = 1) +
+  labs(
+    title    = "Global Average FDI Inflows Over Time",
+    subtitle = "Shaded band = +/-1 SD across countries",
+    x        = NULL,
+    y        = "FDI net inflows (% of GDP)"
+  ) +
+  theme_minimal()
+```
+
+## 3.5 Correlation Matrix
+
+```{r corrplot, fig.height=6}
+cor_vars <- panel %>%
+  select(log_gdp_pc, fdi, fdi_lag1, trade, nat_resources,
+         gov_composite, literacy, energy_use, tax_revenue) %>%
+  drop_na()
+
+corrplot(
+  cor(cor_vars),
+  method = "color",
+  type   = "upper",
+  tl.cex = 0.85,
+  col    = colorRampPalette(c("#d73027", "white", "#1a9850"))(200),
+  title  = "Correlation Matrix - Key Variables",
+  mar    = c(0, 0, 2, 0)
+)
+```
+
+## 3.6 GDP Trends — Selected Countries
+
+```{r gdp-trends}
+showcase <- c("USA", "CHN", "IND", "BRA", "DEU", "NGA", "BGD")
+
+panel %>%
+  filter(iso3 %in% showcase, !is.na(gdp_pc)) %>%
+  ggplot(aes(x = year, y = gdp_pc, colour = iso3)) +
+  geom_line(linewidth = 0.9) +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title  = "GDP per Capita Over Time - Selected Countries",
+    x      = NULL,
+    y      = "GDP per capita (constant 2015 USD)",
+    colour = "Country"
+  ) +
+  theme_minimal()
+```
+
+---
+
+# 4. Panel Regression (Fixed Effects)
+
+Two-way fixed effects control for time-invariant country differences and global year shocks. Standard errors are clustered by country.
+
+```{r panel-regression}
+model_data <- panel %>%
+  select(country, iso3, year, log_gdp_pc, fdi_lag1, fdi_lag3,
+         fdi_x_gov, trade, nat_resources, gov_composite,
+         trade_lag1, literacy, energy_use, tax_revenue, gov_expense) %>%
+  drop_na() %>%
+  filter(is.finite(log_gdp_pc))
+
+pdata <- pdata.frame(model_data, index = c("iso3", "year"))
+
+# Model 1: FDI only
+fe1 <- plm(log_gdp_pc ~ fdi_lag1,
+           data = pdata, model = "within", effect = "twoways")
+
+# Model 2: FDI + macro controls
+fe2 <- plm(log_gdp_pc ~ fdi_lag1 + trade + nat_resources +
+             tax_revenue + gov_expense,
+           data = pdata, model = "within", effect = "twoways")
+
+# Model 3: Full specification
+fe3 <- plm(log_gdp_pc ~ fdi_lag1 + fdi_lag3 + fdi_x_gov +
+             gov_composite + trade + trade_lag1 + nat_resources +
+             tax_revenue + energy_use + literacy,
+           data = pdata, model = "within", effect = "twoways")
+
+robust_se <- function(model) {
+  coeftest(model, vcov = vcovHC(model, type = "HC1", cluster = "group"))
+}
+```
+
+## Model 1 - FDI Only
+
+```{r fe1}
+robust_se(fe1)
+```
+
+## Model 2 - FDI + Macro Controls
+
+```{r fe2}
+robust_se(fe2)
+```
+
+## Model 3 - Full Specification
+
+```{r fe3}
+robust_se(fe3)
+```
+
+## Model Fit Summary
+
+```{r r-squared}
+tibble(
+  Model       = c("1: FDI only", "2: + Macro", "3: Full"),
+  `Within R2` = c(
+    round(summary(fe1)$r.squared["rsq"], 4),
+    round(summary(fe2)$r.squared["rsq"], 4),
+    round(summary(fe3)$r.squared["rsq"], 4)
+  )
+) %>%
+  kable() %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+---
+
+# 5. Machine Learning - XGBoost
+
+Time-aware split to prevent data leakage: train on 1960-2015, validate on 2016-2019, test on 2020+.
+
+```{r xgboost-setup}
+features <- c("fdi_lag1", "fdi_lag3", "fdi_x_gov",
+              "trade", "trade_lag1", "nat_resources", "gov_composite",
+              "gov_roll3", "literacy", "energy_use",
+              "tax_revenue", "gov_expense")
+
+ml_data <- panel %>%
+  select(year, log_gdp_pc, all_of(features)) %>%
+  drop_na() %>%
+  filter(is.finite(log_gdp_pc))
+
+train <- ml_data %>% filter(year <= 2015)
+valid <- ml_data %>% filter(year > 2015, year <= 2019)
+test  <- ml_data %>% filter(year >= 2020)
+
+make_matrix <- function(df) as.matrix(df %>% select(all_of(features)))
+
+dtrain <- xgb.DMatrix(make_matrix(train), label = train$log_gdp_pc)
+dvalid <- xgb.DMatrix(make_matrix(valid), label = valid$log_gdp_pc)
+dtest  <- xgb.DMatrix(make_matrix(test),  label = test$log_gdp_pc)
+```
+
+```{r xgboost-train}
+params <- list(
+  objective        = "reg:squarederror",
+  eta              = 0.05,
+  max_depth        = 4,
+  subsample        = 0.8,
+  colsample_bytree = 0.8,
+  min_child_weight = 5
+)
+
+set.seed(42)
+xgb_model <- xgb.train(
+  params                = params,
+  data                  = dtrain,
+  nrounds               = 500,
+  watchlist             = list(train = dtrain, valid = dvalid),
+  early_stopping_rounds = 30,
+  print_every_n         = 100,
+  verbose               = 1
+)
+```
+
+## Performance
+
+```{r xgb-performance}
+pred_valid <- predict(xgb_model, dvalid)
+pred_test  <- predict(xgb_model, dtest)
+
+tibble(
+  Split = c("Validation (2016-2019)", "Test (2020+)"),
+  RMSE  = c(round(rmse(valid$log_gdp_pc, pred_valid), 4),
+             round(rmse(test$log_gdp_pc,  pred_test),  4)),
+  MAE   = c(round(mae(valid$log_gdp_pc,  pred_valid), 4),
+             round(mae(test$log_gdp_pc,   pred_test),  4))
+) %>%
+  kable() %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+## Feature Importance
+
+```{r xgb-importance, fig.height=5}
+importance <- xgb.importance(feature_names = features, model = xgb_model)
+xgb.plot.importance(importance,
+                    main = "XGBoost Feature Importance - GDP Prediction",
+                    col  = "#2166ac")
+```
+
+## Actual vs Predicted
+
+```{r xgb-scatter}
+tibble(
+  actual    = valid$log_gdp_pc,
+  predicted = pred_valid
+) %>%
+  ggplot(aes(x = actual, y = predicted)) +
+  geom_point(alpha = 0.5, colour = "#2166ac", size = 2) +
+  geom_abline(slope = 1, intercept = 0, colour = "red",
+              linetype = "dashed", linewidth = 0.8) +
+  labs(
+    title    = "Actual vs Predicted Log GDP per Capita",
+    subtitle = "Validation set (2016-2019) — dashed line = perfect fit",
+    x        = "Actual",
+    y        = "Predicted"
+  ) +
+  theme_minimal()
+```
+
+---
+
+# 6. Forecast 2024-2030
+
+Each country's predictors held at their 2023 values. Missing values imputed with the global median.
+
+```{r forecast}
+latest <- panel %>%
+  filter(year == 2023) %>%
+  select(iso3, country, all_of(features))
+
+for (v in features) {
+  med <- median(latest[[v]], na.rm = TRUE)
+  latest[[v]][is.na(latest[[v]])] <- med
+}
+
+forecast_rows <- expand_grid(iso3 = latest$iso3, year = 2024:2030) %>%
+  left_join(latest, by = "iso3")
+
+dforecast <- xgb.DMatrix(as.matrix(forecast_rows %>% select(all_of(features))))
+forecast_rows$pred_log_gdp <- predict(xgb_model, dforecast)
+forecast_rows$pred_gdp_pc  <- exp(forecast_rows$pred_log_gdp)
+```
+
+```{r forecast-plot}
+historical <- panel %>%
+  filter(iso3 %in% showcase, !is.na(gdp_pc)) %>%
+  select(iso3, year, gdp_pc) %>%
+  mutate(type = "Historical")
+
+projected <- forecast_rows %>%
+  filter(iso3 %in% showcase) %>%
+  select(iso3, year, gdp_pc = pred_gdp_pc) %>%
+  mutate(type = "Forecast")
+
+bind_rows(historical, projected) %>%
+  ggplot(aes(x = year, y = gdp_pc, colour = iso3,
+             linetype = type, group = interaction(iso3, type))) +
+  geom_line(linewidth = 0.9) +
+  scale_y_continuous(labels = comma) +
+  scale_linetype_manual(values = c("Historical" = "solid", "Forecast" = "dashed")) +
+  labs(
+    title    = "GDP per Capita: Historical + Forecast (2024-2030)",
+    subtitle = "XGBoost projection | predictors held at 2023 levels",
+    x        = NULL,
+    y        = "GDP per capita (constant 2015 USD)",
+    colour   = "Country",
+    linetype = NULL
+  ) +
+  theme_minimal()
+```
+
+## Top 10 Countries by Projected GDP per Capita in 2030
+
+```{r top10}
+forecast_rows %>%
+  filter(year == 2030) %>%
+  arrange(desc(pred_gdp_pc)) %>%
+  select(Country = country, `Projected GDP pc (2030)` = pred_gdp_pc) %>%
+  head(10) %>%
+  mutate(`Projected GDP pc (2030)` = dollar(round(`Projected GDP pc (2030)`))) %>%
+  kable() %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+---
+
+# 7. Export Results
+
+```{r export, eval=FALSE, include=FALSE}
+write.csv(panel,         "FDI_GDP_panel_clean.csv",        row.names = FALSE)
+write.csv(forecast_rows, "FDI_GDP_forecast_2024_2030.csv", row.names = FALSE)
+
+cat("Saved: FDI_GDP_panel_clean.csv and FDI_GDP_forecast_2024_2030.csv")
+```
+
+---
+
+
+
+
+\pagebreak
+# Code Appendix
+
+```{r ref.label = knitr::all_labels(), echo = TRUE, eval = FALSE}
+```
+
+\vfill
+
+Attributions: I have used some template/styling code from GitHub user alexpghayes.

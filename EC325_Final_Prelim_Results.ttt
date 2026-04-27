@@ -1,0 +1,55 @@
+\begin{table}
+\centering
+\begin{tblr}[         %% tabularray outer open
+]                     %% tabularray outer close
+{                     %% tabularray inner open
+colspec={Q[]Q[]},
+hline{2}={1-2}{solid, black, 0.05em},
+hline{34}={1-2}{solid, black, 0.05em},
+hline{1}={1-2}{solid, black, 0.08em},
+hline{41}={1-2}{solid, black, 0.08em},
+column{2}={}{halign=c},
+column{1}={}{halign=l},
+}                     %% tabularray inner close
+& (1) \\
+(Intercept) & \num{10737.872} \\
+& (\num{3714.170}) \\
+nat\_resources & \num{-113.687} \\
+& (\num{49.646}) \\
+corruption & \num{1910.048} \\
+& (\num{714.358}) \\
+pol\_stability & \num{922.743} \\
+& (\num{397.224}) \\
+gini & \num{-39.538} \\
+& (\num{36.443}) \\
+tax\_revenue & \num{-522.227} \\
+& (\num{89.613}) \\
+gov\_expense & \num{181.071} \\
+& (\num{42.871}) \\
+rule\_of\_law & \num{2042.164} \\
+& (\num{957.417}) \\
+reg\_quality & \num{1625.708} \\
+& (\num{765.296}) \\
+literacy & \num{35.357} \\
+& (\num{26.099}) \\
+energy\_use & \num{2.784} \\
+& (\num{0.403}) \\
+trade & \num{-35.626} \\
+& (\num{9.872}) \\
+fdi & \num{3.105} \\
+& (\num{118.979}) \\
+gdp\_growth & \num{-124.025} \\
+& (\num{2887.940}) \\
+fdi.pp & \num{0.245} \\
+& (\num{0.471}) \\
+fdi\_pos & \num{-233.908} \\
+& (\num{2380.167}) \\
+Num.Obs. & \num{225} \\
+R2 & \num{0.809} \\
+R2 Adj. & \num{0.796} \\
+AIC & \num{4290.2} \\
+BIC & \num{4348.3} \\
+Log.Lik. & \num{-2128.108} \\
+RMSE & \num{3100.50} \\
+\end{tblr}
+\end{table}

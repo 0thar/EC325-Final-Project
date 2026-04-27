@@ -1,0 +1,271 @@
+---
+title: "EC325 Preliminary Results"
+author: "Alex Menr, Tucker Reinhard, and Othar Zaldastani II"
+date: "April 24, 2026"
+format:
+  html:
+    pdf-engine: pdflatex
+    geometry: "margin=1in"
+    df-print: paged
+    toc: false
+    keep-tex: true
+    fig-cap-location: bottom
+  
+execute:
+  echo: false
+  warning: false
+  cache: true
+  freeze: auto
+
+editor:
+  mode: source
+knitr:
+  opts_chunk:
+    render: knitr::normal_print
+---
+
+```{r}
+#| label: setup
+#| echo: true
+#| results: hide
+#| message: false
+#| warning: false
+#| include: false
+# Setup Chunk
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  results = 'hold',
+  fig.align = "center",
+  attr.source = '.numberLines',
+  cache = FALSE
+)
+library(tidyverse)              # Packages
+library(psych)
+library(psychTools)
+library(dplyr)
+library(knitr)
+library(kableExtra)
+library(epitools)
+library(broom)
+library(modelsummary)
+library(kableExtra)
+library(plm)
+library(fixest)
+set.seed(24)                    # Seed for reproducibility
+options(                        # Custom Model Summary
+  modelsummary_stars = TRUE,
+  modelsummary_output = "markdown",
+  modelsummary_shape = model ~ term,
+  modelsummary_fmt = 2,
+  modelsummary_gof_omit = "")
+ms <- function(models, ...) {
+  model_name <- deparse(substitute(models))
+  g <- broom::glance(models)
+  modelsummary(models, stars = FALSE, output = "markdown",
+               shape = model ~ term, fmt = 2,
+               statistic = c("({std.error})", "p = {p.value}"),
+               notes = paste0("Model: ", model_name,
+                              " | R² = ", round(g$r.squared, 3),
+                              ", Adj. R² = ", round(g$adj.r.squared, 3),
+                              ", F = ", round(g$statistic, 2),
+                              ", p = ", format.pval(g$p.value, digits = 3),
+                              ", N = ", g$nobs), ...)
+}
+kable.dark <- function(x, ...) {    # Custom kable for debugging in dark mode
+  kableExtra::kable_styling(
+    knitr::kable(x, ...))}
+
+# Need fig.cap = "Name" for appendix figures
+# No fig.cap will make it knit in place
+```
+
+```{r load-reshape}
+FDI_Data4 <- read.csv("~/Downloads/P_Data_Extract_From_World_Development_Indicators-2/e24a155d-2435-4e2c-954e-222fbe9ccf40_Data.csv")
+raw <- FDI_Data4
+names(raw) <- gsub("\\.", " ", names(raw)) |> trimws()
+
+long <- raw %>%
+  pivot_longer(
+    cols      = matches("^X\\d{4}"),
+    names_to  = "year_label",
+    values_to = "value"
+  ) %>%
+  mutate(
+    year  = as.integer(str_extract(year_label, "\\d{4}")),
+    value = suppressWarnings(as.numeric(value)),
+    var   = case_when(
+      `Series Name` == "Total natural resources rents (% of GDP)"                  ~ "nat_resources",
+      `Series Name` == "Control of Corruption: Estimate"                           ~ "corruption",
+      `Series Name` == "Government Effectiveness: Estimate"                        ~ "gov_effectiveness",
+      `Series Name` == "Political Stability and Absence of Violence/Terrorism: Estimate" ~ "pol_stability",
+      `Series Name` == "Gini index"                                                ~ "gini",
+      `Series Name` == "Tax revenue (% of GDP)"                                    ~ "tax_revenue",
+      `Series Name` == "Expense (% of GDP)"                                        ~ "gov_expense",
+      `Series Name` == "Rule of Law: Estimate"                                     ~ "rule_of_law",
+      `Series Name` == "Regulatory Quality: Estimate"                              ~ "reg_quality",
+      `Series Name` == "Literacy rate, adult total (% of people ages 15 and above)" ~ "literacy",
+      grepl("Human capital", `Series Name`)                                        ~ "hci",
+      `Series Name` == "Energy use (kg of oil equivalent per capita)"              ~ "energy_use",
+      `Series Name` == "Trade (% of GDP)"                                          ~ "trade",
+      `Series Name` == "GDP per capita (constant 2015 US$)"                        ~ "gdp_pc",
+      `Series Name` == "Foreign direct investment, net inflows (% of GDP)"         ~ "fdi",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(var)) %>%
+  select(`Country Name`, `Country Code`, year, var, value)
+
+panel <- long %>%
+  pivot_wider(
+    id_cols     = c(`Country Name`, `Country Code`, year),
+    names_from  = var,
+    values_from = value,
+    values_fn   = mean
+  ) %>%
+  rename(country = `Country Name`, iso3 = `Country Code`) %>%
+  rename_with(~ gsub("[^a-zA-Z0-9_]", "_", .x)) %>%
+  filter(year >= 1996, year <= 2023)
+```
+
+
+```{r}
+# Creating Lagged GDP_pc
+panel <- panel |> 
+  arrange(iso3, year) |> 
+  group_by(iso3) |> 
+  mutate(gdp3 = dplyr::lead(gdp_pc, 3)) |> 
+  ungroup()
+
+# GDP Growth
+panel <- panel |> 
+  arrange(iso3, year) |> 
+  group_by(iso3) |> 
+  mutate(gdp_growth = 1-(gdp3/gdp_pc)) |> 
+  ungroup()
+
+# FDI Per Capita
+panel$fdi.pp = panel$gdp_pc * panel$fdi / 100
+
+# FDI Factor
+panel <- panel |> 
+  mutate(fdi_pos = as.integer(fdi > 0))
+
+panel.pos <- panel |> filter(fdi > 0)
+
+```
+
+```{r}
+# Bivariate Model
+bivariate.model = lm(gdp3 ~ fdi, data = panel)
+#ms(bivariate.model)
+
+# Bivariate Factor Model
+bivariate.model2 = lm(gdp_growth ~ fdi_pos, data = panel)
+#ms(bivariate.model2)
+
+# Bivariate Factor Model 2
+bivariate.model3 = lm(gdp_growth ~ fdi, data = panel)
+#ms(bivariate.model3)
+```
+
+```{r}
+# Full Model
+full <- lm(gdp3 ~ . - gdp_pc - country - year - iso3, data = panel)
+
+
+# Manual Stepwise Regression
+# Removing Variable With Highest p-value
+m2 = update(full, . ~ . - gov_effectiveness)
+
+m3 = update(m2, . ~ . - gini)
+
+m4 = update(m3, . ~ . - rule_of_law)
+
+m5 = update(m4, . ~ . - pol_stability)
+
+m6 = update(m5, . ~ . - literacy)
+
+m7 = update(m6, . ~ . - reg_quality)
+```
+```{r}
+#| include: false
+df <- panel |> select(-country, -iso3, -year, -gdp_pc, -gini) |> na.omit()
+
+null <- lm(gdp3 ~ 1, data = df)
+full <- lm(gdp3 ~ ., data = df)
+
+forward <- step(null, 
+                scope = list(lower = null, upper = full),
+                direction = "forward")
+
+```
+
+
+# Bivariate Models
+## Primary Bivariate Model 
+
+This model is a bivariate regression of GDP per capita looking 3 years forward and FDI- both in dollar amounts. The coefficient is statistically significant and it displays at all confidence levels though. We find a one dollar increase in FDI correlates with a \$79.33 increase in the GDP per capita ceteris paribus. 
+```{r}
+ms(bivariate.model)
+```
+
+
+## Other Bivariate Models
+Below are some of the other bivariate models we tested but did not find as useful as the primary one.
+```{r}
+ms(bivariate.model2)
+ms(bivariate.model3)
+```
+
+
+
+# Multivariate Models
+## Full Model
+
+```{r}
+ms(full)
+```
+
+This table displays the full model with each of the variables we intend to control for. A 1 dollar increase in an FDI correlates with a \$62 increase in GDP per capita ceteris paribus. Notably there was a slight decrease in the coefficient for FDI but it is still significantly significant with a p value of .003. We will likely remove some of the government variables (`gov_effectiveness`, `pol_stability`, `corruption`) as they are colinear. Notably this model has an adjusted $R^2$ value of .8 which is far higher than the bivariate adj $R^2$ of .03. 
+
+
+## Manual Stepwise Model
+
+To create the stepwise model, we start with a full model with every predictor variable. Unsurprisingly, there are a lot of multicollinearity and overplotting. Using a combination of logic and data we choose one variable at a time to remove and then tested the new model without that variable. We continue this process a few more times, resulting in a model with what we believed to be the most important variables. We also use adjusted $R^2$ to compare the models.
+
+```{r}
+ms(m7)
+```
+
+## Automated Stepwise Model
+
+Alternatively, we also had R  run a forward stepwise model. This method has R start with a null model and continues adding variables one at a time. R tests each model using strictly statistical indicators to evaluate each model. Once the model starts to get worse statistically, R stops adding variables leaving you with the “best” statistical model. This was the resulting model.
+
+
+```{r}
+ms(forward)
+```
+
+
+
+
+
+
+
+
+
+\pagebreak
+
+# Appendix
+
+```{r}
+#| ref.label: !expr knitr::all_labels()
+#| echo: true
+#| eval: false
+```
+
+\vfill
+
+Attributions: Template code comes from `alexpghayes`, modified by Claude and myself.
