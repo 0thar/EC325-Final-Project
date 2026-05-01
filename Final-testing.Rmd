@@ -1,0 +1,283 @@
+---
+title: "EC325 Preliminary Results"
+author: "TR, AM, OZ"
+date: ""
+format:
+  html:
+    pdf-engine: pdflatex
+    geometry: "margin=1in"
+    df-print: paged
+    toc: false
+    keep-tex: true
+    fig-cap-location: bottom
+  
+execute:
+  echo: false
+  warning: false
+  cache: true
+  freeze: auto
+
+editor:
+  mode: source
+knitr:
+  opts_chunk:
+    render: knitr::normal_print
+---
+
+```{r}
+library(tidyverse)              # Packages
+library(psych)
+library(psychTools)
+library(dplyr)
+library(knitr)
+library(kableExtra)
+library(epitools)
+library(broom)
+library(modelsummary)
+library(kableExtra)
+library(plm)
+library(fixest)
+set.seed(24)                    # Seed for reproducibility
+options(                        # Custom Model Summary
+  modelsummary_stars = TRUE,
+  modelsummary_output = "markdown",
+  modelsummary_shape = model ~ term,
+  modelsummary_fmt = 2,
+  modelsummary_gof_omit = "")
+ms <- function(models, ...) {
+  model_name <- deparse(substitute(models))
+  g <- broom::glance(models)
+  modelsummary(models, stars = FALSE, output = "markdown",
+               shape = model ~ term, fmt = 2,
+               statistic = c("({std.error})", "p = {p.value}"),
+               notes = paste0("Model: ", model_name,
+                              " | R² = ", round(g$r.squared, 3),
+                              ", Adj. R² = ", round(g$adj.r.squared, 3),
+                              ", F = ", round(g$statistic, 2),
+                              ", p = ", format.pval(g$p.value, digits = 3),
+                              ", N = ", g$nobs), ...)
+}
+kable.dark <- function(x, ...) {    # Custom kable for debugging in dark mode
+  kableExtra::kable_styling(
+    knitr::kable(x, ...))}
+
+# Need fig.cap = "Name" for appendix figures
+# No fig.cap will make it knit in place
+```
+
+```{r load-reshape}
+FDI_Data4 <- read.csv(("~/Desktop/ec325/e24a155d-2435-4e2c-954e-222fbe9ccf40_Data.csv"))
+raw <- FDI_Data4
+names(raw) <- gsub("\\.", " ", names(raw)) |> trimws()
+
+long <- raw %>%
+  pivot_longer(
+    cols      = matches("^X\\d{4}"),
+    names_to  = "year_label",
+    values_to = "value"
+  ) %>%
+  mutate(
+    year  = as.integer(str_extract(year_label, "\\d{4}")),
+    value = suppressWarnings(as.numeric(value)),
+    var   = case_when(
+      `Series Name` == "Total natural resources rents (% of GDP)"                  ~ "nat_resources",
+      `Series Name` == "Control of Corruption: Estimate"                           ~ "corruption",
+      `Series Name` == "Government Effectiveness: Estimate"                        ~ "gov_effectiveness",
+      `Series Name` == "Political Stability and Absence of Violence/Terrorism: Estimate" ~ "pol_stability",
+      `Series Name` == "Gini index"                                                ~ "gini",
+      `Series Name` == "Tax revenue (% of GDP)"                                    ~ "tax_revenue",
+      `Series Name` == "Expense (% of GDP)"                                        ~ "gov_expense",
+      `Series Name` == "Rule of Law: Estimate"                                     ~ "rule_of_law",
+      `Series Name` == "Regulatory Quality: Estimate"                              ~ "reg_quality",
+      `Series Name` == "Literacy rate, adult total (% of people ages 15 and above)" ~ "literacy",
+      grepl("Human capital", `Series Name`)                                        ~ "hci",
+      `Series Name` == "Energy use (kg of oil equivalent per capita)"              ~ "energy_use",
+      `Series Name` == "Trade (% of GDP)"                                          ~ "trade",
+      `Series Name` == "GDP per capita (constant 2015 US$)"                        ~ "gdp_pc",
+      `Series Name` == "Foreign direct investment, net inflows (% of GDP)"         ~ "fdi",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(var)) %>%
+  select(`Country Name`, `Country Code`, year, var, value)
+
+panel <- long %>%
+  pivot_wider(
+    id_cols     = c(`Country Name`, `Country Code`, year),
+    names_from  = var,
+    values_from = value,
+    values_fn   = mean
+  ) %>%
+  rename(country = `Country Name`, iso3 = `Country Code`) %>%
+  rename_with(~ gsub("[^a-zA-Z0-9_]", "_", .x)) %>%
+  filter(year >= 1996, year <= 2023)
+```
+
+
+```{r}
+# Creating Lagged GDP_pc
+panel <- panel |> 
+  arrange(iso3, year) |> 
+  group_by(iso3) |> 
+  mutate(gdp3 = dplyr::lead(gdp_pc, 3)) |> 
+  ungroup()
+
+# GDP Growth
+panel <- panel |> 
+  arrange(iso3, year) |> 
+  group_by(iso3) |> 
+  mutate(gdp_growth = 1-(gdp3/gdp_pc)) |> 
+  ungroup()
+
+# FDI Per Capita
+panel$fdi.pp = panel$gdp_pc * panel$fdi / 100
+
+# FDI Factor
+panel <- panel |> 
+  mutate(fdi_pos = as.integer(fdi > 0))
+
+panel.pos <- panel |> filter(fdi > 0)
+
+```
+
+```{r}
+# Bivariate Model
+bivariate.model <- lm(gdp3 ~ fdi, data = panel)
+summary(bivariate.model)
+
+# Bivariate Factor Model
+bivariate.model2 <- lm(gdp_growth ~ fdi_pos, data = panel)
+summary(bivariate.model2)
+
+# Bivariate Factor Model 2
+bivariate.model3 <- lm(gdp_growth ~ fdi, data = panel)
+summary(bivariate.model3)
+```
+
+```{r}
+# Full Model
+full <- lm(gdp3 ~ . - gdp_pc - country - year - iso3 - fdi_pos - fdi.pp - gdp_growth, data = panel)
+summary(full)
+
+#Full model for fdi_pos
+full <- lm(gdp3 ~ . - gdp_pc - country - year - iso3 - fdi - fdi.pp - gdp_growth, data = panel)
+summary(full)
+
+# Manual Stepwise Regression
+# Removing Variable With Highest p-value
+m2 = update(full, . ~ . - gov_effectiveness)
+summary(m2)
+
+m3 = update(m2, . ~ . - gini)
+summary(m3)
+
+m4 = update(m3, . ~ . - rule_of_law)
+summary(m4)
+
+m5 = update(m4, . ~ . - pol_stability)
+summary(m5)
+
+m6 = update(m5, . ~ . - gdp_growth)
+summary(m6)
+
+m7 = update(m7, . ~ . - fdi_pp)
+summary(m7)
+```
+
+
+```{r}
+null_model <- lm(gdp3 ~ 1, data = panel)
+# 3. Perform forward selection
+forward_model <- step(null_model, 
+                      scope = list(lower = null_model, upper = full), 
+                      direction = "forward", na.rm = T)
+
+# 1. Create a vector of all variable names you are using
+vars_to_keep <- c("gdp3", "rule_of_law", "gov_effectiveness", "corruption", 
+                  "energy_use", "reg_quality", "gov_expense", "literacy", 
+                  "pol_stability", "nat_resources", "gini", "tax_revenue", 
+                  "fdi", "trade")
+
+# 2. Subset your data to include only these columns and remove all NAs
+clean_data <- na.omit(panel[, vars_to_keep])
+
+# 3. Re-run the models using this clean_data
+full_model <- lm(gdp3 ~ ., data = clean_data)
+null_model <- lm(gdp3 ~ 1, data = clean_data)
+
+# 4. Run the stepwise selection again
+forward_model <- step(null_model, 
+                      scope = list(lower = null_model, upper = full_model), 
+                      direction = "forward")
+
+```
+
+```{r}
+foward_step_lm <- lm(gdp3 ~ rule_of_law + energy_use + trade + nat_resources + fdi + 
+    tax_revenue + gov_expense + corruption + pol_stability + 
+    reg_quality, data = clean_data)
+summary(foward_step_lm)
+```
+
+
+```{r}
+did_lm <- feols(gdp3 ~ fdi + rule_of_law + energy_use + trade + 
+                nat_resources + tax_revenue + gov_expense + 
+                corruption + pol_stability + reg_quality 
+                | country + year, 
+                data = panel, cluster = "country")
+
+summary(did_lm)
+
+# Extract the coefficient for FDI
+fdi_coef <- coef(did_lm)["fdi"]
+
+# Extract the p-value for FDI
+fdi_p <- pvalue(did_lm)["fdi"]
+
+# Print them nicely
+cat("Coefficient:", fdi_coef, "\nP-value:", fdi_p)
+
+```
+
+
+```{r}
+ggplot(data=panel)+geom_point(aes(x=year,y=fdi))
+
+```
+
+
+
+
+
+```{r}
+summary(panel$fdi)
+sd_fdi<-sd(panel$fdi,na.rm=T)
+#1SD above mean
+one_sd = 8.276+sd_fdi
+
+
+#2SD above mean
+two_sd = 8.276+2*sd_fdi
+
+panel <- panel |> mutate(fdi_bi = ifelse(fdi >= one_sd & fdi <= two_sd, 1, 0))
+
+did_lm2 <- feols(gdp3 ~ fdi_bi + rule_of_law + energy_use + trade + 
+                nat_resources + tax_revenue + gov_expense + 
+                corruption + pol_stability + reg_quality 
+                | country + year, 
+                data = panel, na.rm=T, cluster = "country")
+
+modelsummary(did_lm2)
+summary(did_lm2)
+
+# Extract the coefficient for FDI
+fdi_coef <- coef(did_lm2)["fdi_bi"]
+
+# Extract the p-value for FDI
+fdi_p <- pvalue(did_lm2)["fdi_bi"]
+
+# Print them nicely
+cat("Coefficient:", fdi_coef, "\nP-value:", fdi_p)
+
+```
